@@ -1,0 +1,266 @@
+---
+title: "p8105_hw5_tp2806"
+author: "Tejashree Prakash"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(p8105.datasets)
+library(broom)
+library(modelr)
+```
+
+
+# Problem 1
+
+#### Cleaning the data. 
+```{r}
+#Load data
+homicide_df <- read_csv("data/homicide-data.csv")
+
+#Add city_state variable 
+homicide_df <- homicide_df %>%
+  mutate(city_state = str_c(city, ", ", state))
+
+#Add homicide variable 
+homicide_df <- homicide_df %>%
+  mutate(
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age),
+    victim_race = fct_relevel(victim_race, "White")) %>%
+  filter(!city %in% c("Dallas", "Phoenix", "Kansas City", "Tulsa")) %>%
+  filter(victim_race %in% c("Black", "White"))
+
+head(homicide_df, 5)
+```
+
+#### Performing regression model for Baltimore. 
+```{r}
+baltimore_df <- homicide_df %>%
+  filter(city_state == "Baltimore, MD")
+
+baltimore_log <- 
+  homicide_df %>% 
+  glm(resolved ~ victim_age + victim_race + victim_sex, data = ., family = binomial()) 
+
+baltimore_log_results <- baltimore_log %>%
+  broom::tidy() %>% 
+  mutate(OR = exp(estimate)) %>%
+  select(term, log_OR = estimate, OR, p.value)
+
+baltimore_log_results %>%
+  knitr::kable(digits = 3)
+```
+
+#### Performing log for each city. 
+
+```{r}
+nest_city_results <-
+  homicide_df |> 
+  nest(data = -city_state) %>%
+  mutate(
+    models = map(data, \(df) glm(resolved ~ victim_sex + victim_age + victim_race, data = df, family = binomial())),
+    results = map(models, broom::tidy, 
+                  exponentiate = TRUE,
+                  conf.int = TRUE)) %>%
+  select(-data, -models) %>%
+  unnest(results)
+
+nest_city_results %>% 
+  filter(term == "victim_sexMale") %>% 
+  select(city_state, OR = estimate, conf_low = conf.low, conf_high = conf.high) %>%
+  knitr::kable(digits = 3)
+
+#Order the dataframe by descending OR 
+city_or_df <- 
+  nest_city_results %>% 
+  filter(term == "victim_sexMale") %>% 
+  select(city_state, OR = estimate, conf_low = conf.low, conf_high = conf.high) %>% 
+  arrange(OR) %>%
+  mutate(city_state = factor(city_state, levels = city_state))
+
+#Produce Plot 
+ggplot(city_or_df, aes(x = city_state, y = OR)) +
+  geom_point(size = 3, color = "blue") +
+  geom_errorbar(aes(ymin = conf_low, ymax = conf_high), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(
+    title = "Adjusted ORs for Homicide Resolution between Male vs Female Victims",
+    x = "City",
+    y = "Odds Ratio (Male vs Female Victims)"
+  ) +
+  theme_minimal(base_size = 14)
+  
+```
+
+The plot above demonstrates the odds ratios for homicide resolution for cases with male victims to cases with female victims. Albuquerque, NM contained the largest OR, indicating that, amongst all of the cities in this dataset, it has the greatest odds of solving homicides with male victims compared to female victims. New York, NY had the smallest OR, indicating it has the lowest odds of solving homicides with male victims compared to female victims. The width of the confidence interval bars indicates the precision of each estimate. Therefore, Fresno, Stockton, and Albuquerque has relatively lower precision due to the widest CIs. 
+
+
+# Problem 2 
+
+#### Boostrapping for Estimates
+
+```{r}
+data("weather_df")
+
+#Bootstrap function with the estimates 
+bootstrap_fn <- function(df) {
+  boot_df <- df %>% 
+    sample_frac(size = 1, replace = TRUE)
+  fit <- lm(tmax ~ tmin + prcp, data = boot_df) #fit model
+  r2 <- glance(fit)$r.squared 
+  coefs <- tidy(fit) 
+  beta1 <- coefs$estimate[coefs$term == "tmin"] #the two predictors for betas
+  beta2 <- coefs$estimate[coefs$term == "prcp"]
+  tibble( #make table
+    r2 = r2,
+    beta1_beta2 = beta1 / beta2
+  )
+}
+
+#Run 5000 bootstrap samples with the r2 and betas estimates  
+set.seed(1)
+bootstrap_results <-
+  map_dfr(1:5000, ~ bootstrap_fn(weather_df))
+
+bootstrap_results %>%
+  pivot_longer(everything(),
+               names_to = "parameter",
+               values_to = "estimate") %>%
+  ggplot(aes(x = estimate)) +
+  geom_histogram(bins = 50, color = "white") +
+  facet_wrap(~ parameter, scales = "free") +
+  theme_minimal(base_size = 14) +
+  labs(title = "Distributions of r² and β1/β2",
+       x = "Bootstrap Estimate",
+       y = "Count")
+```
+The distributions for r2 and the Betas differ; the Betas distribution is left skewed, while the r2 distribution is normal.
+
+#### Obtaining CIs
+
+```{r}
+bootstrap_results %>%
+  summarize(
+    r2_lower = quantile(r2, 0.025),
+    r2_upper = quantile(r2, 0.975),
+    betas_lower = quantile(beta1_beta2, 0.025),
+    betas_upper = quantile(beta1_beta2, 0.975)
+  )
+```
+
+#Problem 3
+
+#### Data Cleaning
+
+```{r}
+#Load data
+birthweight_df <- read_csv("data/birthweight.csv")
+
+#Convert categorical variables to factors (continuous remains continuous)
+birthweight_df <- 
+  birthweight_df %>%
+  mutate(
+    babysex = 
+      factor(
+        babysex, 
+        levels = c(1, 2), 
+        labels = c("Male", "Female")),
+    frace = 
+      factor(
+        frace, 
+        levels = c(1, 2, 3, 4, 8, 9), 
+        labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    malform = 
+      factor(
+        malform, 
+        levels = c(0, 1), 
+        labels = c("Absent", "Present")), 
+    mrace = 
+      factor(
+        mrace, 
+        levels = c(1, 2, 3, 4, 8), 
+        labels = c("White", "Black", "Asian", "Puerto Rican", "Other")
+  ))
+    
+#Check for NAs --> none!
+colSums(is.na(birthweight_df))
+```
+
+#### First Regression Model 
+
+```{r}
+main_model <- 
+  birthweight_df %>% 
+  lm(bwt ~ delwt + mheight + momage + mrace + parity + ppwt + pnumlbw + pnumsga + smoken + wtgain, data = .) 
+
+#Model
+main_model %>%
+  broom::tidy() %>%
+  knitr::kable(digits = 3)
+
+#Removing predictors with NA estimates because it indicates multicollinearity 
+main_model_full <- 
+  birthweight_df %>% 
+  lm(bwt ~ delwt + mheight + momage + mrace + parity + ppwt + smoken, data = .) 
+main_model_full %>%
+  broom::tidy() %>%
+  knitr::kable(digits = 3)
+
+#Add residuals
+birthweight_df <- birthweight_df %>%
+  add_predictions(main_model_full) %>%
+  add_residuals(main_model_full)
+
+#Plot residuals
+ggplot(birthweight_df, aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.5, shape = 21, color = "lightgrey", fill = "skyblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  )
+```
+This regression model is built with a hypothesized structure for the parental factors that underly birthweight based off of academic research. According to research, the age, race, and prenatal care that the mother experienced are strong factors that influence birthweight. Mother's attributes are thought to be more influential than father's attributes Additionally, previous pregnancy history is thought to affect birth outcomes as well. I also used a social determinants of health framework. References: https://web.stanford.edu/group/virus/herpes/2000/primaryf.htm <br>
+
+The residuals from the residual plot are mostly centered around zero with a visually random scatter, suggesting homoscedasicity. 
+
+
+
+#### Construction Other Models
+
+```{r}
+#Make length and age model 
+length_age_model <- 
+  birthweight_df %>% 
+  lm(bwt ~ blength + gaweeks, data = .) 
+
+length_age_model %>%
+  broom::tidy() %>%
+  knitr::kable(digits = 3)
+
+#Make head circumference, length, sex, and all interactions model
+interactions_model <- 
+  birthweight_df %>% 
+  lm(bwt ~ bhead + blength + babysex + bhead:blength + bhead:babysex + blength:babysex +
+     bhead:blength:babysex, data = .) 
+
+interactions_model %>%
+  broom::tidy() %>%
+  knitr::kable(digits = 3)
+```
+
+
+#### Comparing Models 
+
+```{r}
+
+```
+
+
